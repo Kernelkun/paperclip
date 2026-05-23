@@ -3,6 +3,16 @@ import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
 
+export type WorkingMemory = {
+  summary: string;
+  commentCursor: string | null;
+  filesTouched: string[];
+  decisions: string[];
+  nextAction: string | null;
+  lastRunId: string | null;
+  updatedAt: string;
+};
+
 export const agentTaskSessions = pgTable(
   "agent_task_sessions",
   {
@@ -15,6 +25,7 @@ export const agentTaskSessions = pgTable(
     sessionDisplayId: text("session_display_id"),
     lastRunId: uuid("last_run_id").references(() => heartbeatRuns.id),
     lastError: text("last_error"),
+    workingMemoryJson: jsonb("working_memory_json").$type<WorkingMemory>(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
