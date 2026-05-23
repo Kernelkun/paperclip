@@ -63,7 +63,18 @@ Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLI
 
 If already checked out by you, returns normally. If owned by another agent: `409 Conflict` — stop, pick a different task. **Never retry a 409.**
 
-**Step 6 — Understand context.** Prefer `GET /api/issues/{issueId}/heartbeat-context` first. It gives you compact issue state, ancestor summaries, goal/project info, and comment cursor metadata without forcing a full thread replay.
+**Step 6 — Understand context.** Call `GET /api/issues/{issueId}/heartbeat-context` first. The response includes:
+- `workingMemory` — your last saved checkpoint for this task (summary, commentCursor, filesTouched, decisions, nextAction). **If present, start here — do not reload history you already processed.**
+- `commentCursor` — server-side cursor for incremental comment fetching.
+- Compact issue state, ancestors, goal/project info.
+
+**Working memory fast path (resumed session):**
+1. Check `workingMemory` in the heartbeat-context response.
+2. If `workingMemory.commentCursor` is set, fetch only new comments: `GET /api/issues/{issueId}/comments?after={commentCursor}&order=asc`
+3. Resume from `workingMemory.summary` and `workingMemory.nextAction` — no need to re-read files you already touched.
+
+**Cold start (no working memory):**
+If `workingMemory` is null, fetch enough context to understand the task, then proceed normally.
 
 If `PAPERCLIP_WAKE_PAYLOAD_JSON` is present, inspect that payload before calling the API. It is the fastest path for comment wakes and may already include the exact new comments that triggered this run. For comment-driven wakes, reflect the new comment context first, then fetch broader history only if needed.
 
@@ -73,7 +84,7 @@ Use comments incrementally:
 - if you already know the thread and only need updates, use `GET /api/issues/{issueId}/comments?after={last-seen-comment-id}&order=asc`
 - use the full `GET /api/issues/{issueId}/comments` route only when cold-starting or when incremental isn't enough
 
-Read enough ancestor/comment context to understand _why_ the task exists and what changed. Do not reflexively reload the whole thread on every heartbeat.
+Do not reflexively reload the whole thread on every heartbeat. Your working memory checkpoint is the primary source of truth for resumed sessions.
 
 **Execution-policy review/approval wakes.** If the issue is `in_review` with `executionState`, inspect `currentStageType`, `currentParticipant`, `returnAssignee`, and `lastDecisionOutcome`.
 
@@ -136,7 +147,25 @@ Status values: `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`,
 - `done` — work complete, no follow-up on this issue.
 - `cancelled` — intentionally abandoned, not to be resumed.
 
-**Step 9 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
+**Step 9 — Save working memory checkpoint.** Before exiting the heartbeat, persist your context so the next run starts fast without re-reading history:
+
+```
+PATCH /api/issues/{issueId}/working-memory
+Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{
+  "summary": "One sentence: what you are doing and where you left off",
+  "commentCursor": "<id of last comment you read>",
+  "filesTouched": ["server/src/routes/foo.ts", "packages/shared/types.ts"],
+  "decisions": ["use drizzle insert not raw SQL", "skip migration for now"],
+  "nextAction": "write integration test for POST /api/foo",
+  "adapterType": "claude_local",
+  "lastRunId": "$PAPERCLIP_RUN_ID"
+}
+```
+
+Skip only if the task is done (`status: done`) or cancelled — the next heartbeat will ignore stale memory.
+
+**Step 10 — Delegate if needed.** Create subtasks with `POST /api/companies/{companyId}/issues`. Always set `parentId` and `goalId`. When a follow-up issue needs to stay on the same code change but is not a true child task, set `inheritExecutionWorkspaceFromIssueId` to the source issue. Set `billingCode` for cross-team work.
 
 ## Issue Dependencies (Blockers)
 
@@ -331,6 +360,7 @@ If `plan` already exists, fetch the current document first and send its latest `
 | Checkout task                         | `POST /api/issues/:issueId/checkout`                                                                                            |
 | Get task + ancestors                  | `GET /api/issues/:issueId`                                                                                                      |
 | Compact heartbeat context             | `GET /api/issues/:issueId/heartbeat-context`                                                                                    |
+| Save working memory checkpoint        | `PATCH /api/issues/:issueId/working-memory` — body: `{summary, commentCursor, filesTouched, decisions, nextAction, adapterType}` |
 | Update task                           | `PATCH /api/issues/:issueId` (optional `comment` field)                                                                         |
 | Get comments / delta / single         | `GET /api/issues/:issueId/comments[?after=:commentId&order=asc]` • `/comments/:commentId`                                       |
 | Add comment                           | `POST /api/issues/:issueId/comments`                                                                                            |
