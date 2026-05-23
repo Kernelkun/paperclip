@@ -7974,6 +7974,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         logBytes: logSummary?.bytes,
         logSha256: logSummary?.sha256,
         logCompressed: logSummary?.compressed ?? false,
+        inputTokensNormalized: normalizedUsage?.inputTokens ?? null,
+        cachedTokensNormalized: normalizedUsage?.cachedInputTokens ?? null,
+        outputTokensNormalized: normalizedUsage?.outputTokens ?? null,
+        taskSessionReused: taskSessionForRun != null,
       });
       if (persistedRun) {
         persistedRun = await classifyAndPersistRunLiveness(persistedRun, persistedResultJson) ?? persistedRun;

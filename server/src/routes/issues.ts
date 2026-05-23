@@ -6,11 +6,13 @@ import { and, desc, eq, inArray, notInArray } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
+  agentTaskSessions,
   executionWorkspaces,
   issueExecutionDecisions,
   issueRelations,
   issues as issueRows,
   projectWorkspaces,
+  type WorkingMemory,
 } from "@paperclipai/db";
 import {
   addIssueCommentSchema,
@@ -1879,6 +1881,22 @@ export function issueRoutes(
     const currentExecutionWorkspacePromise = issue.executionWorkspaceId
       ? executionWorkspacesSvc.getById(issue.executionWorkspaceId)
       : Promise.resolve(null);
+    const actorAgentId = getActorInfo(req).agentId;
+    const workingMemoryPromise = actorAgentId
+      ? db
+          .select({ workingMemoryJson: agentTaskSessions.workingMemoryJson })
+          .from(agentTaskSessions)
+          .where(
+            and(
+              eq(agentTaskSessions.companyId, issue.companyId),
+              eq(agentTaskSessions.agentId, actorAgentId),
+              eq(agentTaskSessions.taskKey, issue.id),
+            ),
+          )
+          .orderBy(desc(agentTaskSessions.updatedAt))
+          .limit(1)
+          .then((rows) => rows[0]?.workingMemoryJson ?? null)
+      : Promise.resolve(null);
     const [
       { project, goal },
       ancestors,
@@ -1892,6 +1910,7 @@ export function issueRoutes(
       continuationSummary,
       currentExecutionWorkspace,
       activeRecoveryAction,
+      workingMemory,
     ] =
       await Promise.all([
         resolveIssueProjectAndGoal(issue),
@@ -1906,6 +1925,7 @@ export function issueRoutes(
         documentsSvc.getIssueDocumentByKey(issue.id, ISSUE_CONTINUATION_SUMMARY_DOCUMENT_KEY),
         currentExecutionWorkspacePromise,
         recoveryActionsSvc.getActiveForIssue(issue.companyId, issue.id),
+        workingMemoryPromise,
       ]);
     const recoveryActionsByRelationIssue = await relationRecoveryActionMap(
       recoveryActionsSvc,
@@ -1995,7 +2015,53 @@ export function issueRoutes(
           }
         : null,
       currentExecutionWorkspace,
+      workingMemory,
     });
+  });
+
+  router.patch("/issues/:id/working-memory", async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) { res.status(404).json({ error: "Issue not found" }); return; }
+    assertCompanyAccess(req, issue.companyId);
+
+    const actor = getActorInfo(req);
+    if (actor.actorType !== "agent" || !actor.agentId) {
+      res.status(403).json({ error: "Only agents can update working memory" });
+      return;
+    }
+
+    const body = req.body as Partial<WorkingMemory>;
+    const memory: WorkingMemory = {
+      summary: typeof body.summary === "string" ? body.summary : "",
+      commentCursor: typeof body.commentCursor === "string" ? body.commentCursor : null,
+      filesTouched: Array.isArray(body.filesTouched) ? body.filesTouched : [],
+      decisions: Array.isArray(body.decisions) ? body.decisions : [],
+      nextAction: typeof body.nextAction === "string" ? body.nextAction : null,
+      lastRunId: typeof body.lastRunId === "string" ? body.lastRunId : null,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await db
+      .insert(agentTaskSessions)
+      .values({
+        companyId: issue.companyId,
+        agentId: actor.agentId,
+        adapterType: typeof req.body.adapterType === "string" ? req.body.adapterType : "unknown",
+        taskKey: issue.id,
+        workingMemoryJson: memory,
+      })
+      .onConflictDoUpdate({
+        target: [
+          agentTaskSessions.companyId,
+          agentTaskSessions.agentId,
+          agentTaskSessions.adapterType,
+          agentTaskSessions.taskKey,
+        ],
+        set: { workingMemoryJson: memory, updatedAt: new Date() },
+      });
+
+    res.json({ ok: true, workingMemory: memory });
   });
 
   router.get("/issues/:id", async (req, res) => {
